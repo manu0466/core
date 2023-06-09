@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import logging
 
-from qbittorrent.client import Client, LoginRequired
-from requests.exceptions import RequestException
 import voluptuous as vol
 
 from homeassistant.components.sensor import (
@@ -23,10 +21,12 @@ from homeassistant.const import (
     STATE_IDLE,
     UnitOfDataRate,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import QBittorrentClient
 from .const import DEFAULT_NAME, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ async def async_setup_entry(
     async_add_entites: AddEntitiesCallback,
 ) -> None:
     """Set up qBittorrent sensor entries."""
-    client: Client = hass.data[DOMAIN][config_entry.entry_id]
+    client: QBittorrentClient = hass.data[DOMAIN][config_entry.entry_id]
     entities = [
         QBittorrentSensor(description, client, config_entry)
         for description in SENSOR_TYPES
@@ -83,7 +83,7 @@ async def async_setup_entry(
 
 
 def format_speed(speed):
-    """Return a bytes/s measurement as a human readable string."""
+    """Return a bytes/s measurement as a human-readable string."""
     kb_spd = float(speed) / 1024
     return round(kb_spd, 2 if kb_spd < 0.1 else 1)
 
@@ -94,48 +94,66 @@ class QBittorrentSensor(SensorEntity):
     def __init__(
         self,
         description: SensorEntityDescription,
-        qbittorrent_client: Client,
+        qbittorrent_client: QBittorrentClient,
         config_entry: ConfigEntry,
     ) -> None:
         """Initialize the qBittorrent sensor."""
         self.entity_description = description
-        self.client = qbittorrent_client
+        self._client = qbittorrent_client
+        self._config_entry = config_entry
+        self._state = None
 
-        self._attr_unique_id = f"{config_entry.entry_id}-{description.key}"
-        self._attr_name = f"{config_entry.title} {description.name}"
-        self._attr_available = False
+    @property
+    def name(self):
+        """Return the name of the sensor."""
+        return f"{self._config_entry.title} {self.entity_description.name}"
+
+    @property
+    def unique_id(self):
+        """Return the unique id of the entity."""
+        return f"{self._config_entry.entry_id}-{self.entity_description.key}"
+
+    @property
+    def native_value(self):
+        """Return the state of the sensor."""
+        return self._state
+
+    @property
+    def available(self) -> bool:
+        """Could the device be accessed during the last update call."""
+        return self._client.qb_data.available
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity which will be added."""
+
+        @callback
+        def update():
+            """Update the state."""
+            self.async_schedule_update_ha_state(True)
+
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, self._client.qb_data.signal_update, update
+            )
+        )
 
     def update(self) -> None:
         """Get the latest data from qBittorrent and updates the state."""
-        try:
-            data = self.client.sync_main_data()
-            self._attr_available = True
-        except RequestException:
-            _LOGGER.error("Connection lost")
-            self._attr_available = False
-            return
-        except LoginRequired:
-            _LOGGER.error("Invalid authentication")
-            return
-
-        if data is None:
-            return
-
-        download = data["server_state"]["dl_info_speed"]
-        upload = data["server_state"]["up_info_speed"]
+        download = self._client.qb_data.data["server_state"]["dl_info_speed"]
+        upload = self._client.qb_data.data["server_state"]["up_info_speed"]
 
         sensor_type = self.entity_description.key
         if sensor_type == SENSOR_TYPE_CURRENT_STATUS:
             if upload > 0 and download > 0:
-                self._attr_native_value = "up_down"
+                self._state = "up_down"
             elif upload > 0 and download == 0:
-                self._attr_native_value = "seeding"
+                self._state = "seeding"
             elif upload == 0 and download > 0:
-                self._attr_native_value = "downloading"
+                self._state = "downloading"
             else:
-                self._attr_native_value = STATE_IDLE
+                self._state = STATE_IDLE
 
         elif sensor_type == SENSOR_TYPE_DOWNLOAD_SPEED:
-            self._attr_native_value = format_speed(download)
+            self._state = format_speed(download)
         elif sensor_type == SENSOR_TYPE_UPLOAD_SPEED:
-            self._attr_native_value = format_speed(upload)
+            self._state = format_speed(upload)

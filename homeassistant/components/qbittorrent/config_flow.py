@@ -3,16 +3,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from qbittorrent.client import LoginRequired
-from requests.exceptions import RequestException
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.data_entry_flow import FlowResult
 
+from . import AuthenticationError, CannotConnect, get_client
 from .const import DEFAULT_NAME, DEFAULT_URL, DOMAIN
-from .helpers import setup_client
 
 USER_DATA_SCHEMA = vol.Schema(
     {
@@ -36,16 +34,10 @@ class QbittorrentConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._async_abort_entries_match({CONF_URL: user_input[CONF_URL]})
             try:
-                await self.hass.async_add_executor_job(
-                    setup_client,
-                    user_input[CONF_URL],
-                    user_input[CONF_USERNAME],
-                    user_input[CONF_PASSWORD],
-                    user_input[CONF_VERIFY_SSL],
-                )
-            except LoginRequired:
+                await get_client(self.hass, user_input)
+            except AuthenticationError:
                 errors = {"base": "invalid_auth"}
-            except RequestException:
+            except CannotConnect:
                 errors = {"base": "cannot_connect"}
             else:
                 return self.async_create_entry(title=DEFAULT_NAME, data=user_input)
