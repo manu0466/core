@@ -3,31 +3,20 @@ from __future__ import annotations
 
 import logging
 
-import voluptuous as vol
-
 from homeassistant.components.sensor import (
-    PLATFORM_SCHEMA,
     SensorDeviceClass,
     SensorEntity,
-    SensorEntityDescription,
-    SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    CONF_NAME,
-    CONF_PASSWORD,
-    CONF_URL,
-    CONF_USERNAME,
     STATE_IDLE,
     UnitOfDataRate,
 )
 from homeassistant.core import HomeAssistant, callback
-import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
 from . import QBittorrentClient
-from .const import DEFAULT_NAME, DOMAIN
+from .const import DOMAIN, STATE_DOWNLOADING, STATE_SEEDING, STATE_UP_DOWN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,49 +24,18 @@ SENSOR_TYPE_CURRENT_STATUS = "current_status"
 SENSOR_TYPE_DOWNLOAD_SPEED = "download_speed"
 SENSOR_TYPE_UPLOAD_SPEED = "upload_speed"
 
-SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
-    SensorEntityDescription(
-        key=SENSOR_TYPE_CURRENT_STATUS,
-        name="Status",
-    ),
-    SensorEntityDescription(
-        key=SENSOR_TYPE_DOWNLOAD_SPEED,
-        name="Down Speed",
-        icon="mdi:cloud-download",
-        device_class=SensorDeviceClass.DATA_RATE,
-        native_unit_of_measurement=UnitOfDataRate.KIBIBYTES_PER_SECOND,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    SensorEntityDescription(
-        key=SENSOR_TYPE_UPLOAD_SPEED,
-        name="Up Speed",
-        icon="mdi:cloud-upload",
-        device_class=SensorDeviceClass.DATA_RATE,
-        native_unit_of_measurement=UnitOfDataRate.KIBIBYTES_PER_SECOND,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-)
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_URL): cv.url,
-        vol.Required(CONF_USERNAME): cv.string,
-        vol.Required(CONF_PASSWORD): cv.string,
-        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-    }
-)
-
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    async_add_entites: AddEntitiesCallback,
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        async_add_entites: AddEntitiesCallback,
 ) -> None:
     """Set up qBittorrent sensor entries."""
     client: QBittorrentClient = hass.data[DOMAIN][config_entry.entry_id]
     entities = [
-        QBittorrentSensor(description, client, config_entry)
-        for description in SENSOR_TYPES
+        QBittorrentSpeedSensor(client, config_entry, "Down Speed", SENSOR_TYPE_DOWNLOAD_SPEED),
+        QBittorrentSpeedSensor(client, config_entry, "Up Speed", SENSOR_TYPE_UPLOAD_SPEED),
+        QBittorrentStateSensor(client, config_entry, "Status", SENSOR_TYPE_CURRENT_STATUS)
     ]
     async_add_entites(entities, True)
 
@@ -92,26 +50,28 @@ class QBittorrentSensor(SensorEntity):
     """Representation of an qBittorrent sensor."""
 
     def __init__(
-        self,
-        description: SensorEntityDescription,
-        qbittorrent_client: QBittorrentClient,
-        config_entry: ConfigEntry,
+            self,
+            qbittorrent_client: QBittorrentClient,
+            config_entry: ConfigEntry,
+            name: str,
+            key: str,
     ) -> None:
         """Initialize the qBittorrent sensor."""
-        self.entity_description = description
         self._client = qbittorrent_client
         self._config_entry = config_entry
+        self._name = name
+        self._key = key
         self._state = None
 
     @property
     def name(self):
         """Return the name of the sensor."""
-        return f"{self._config_entry.title} {self.entity_description.name}"
+        return f"{self._config_entry.title} {self._name}"
 
     @property
     def unique_id(self):
         """Return the unique id of the entity."""
-        return f"{self._config_entry.entry_id}-{self.entity_description.key}"
+        return f"{self._config_entry.entry_id}-{self._key}"
 
     @property
     def native_value(self):
@@ -137,23 +97,47 @@ class QBittorrentSensor(SensorEntity):
             )
         )
 
+
+class QBittorrentSpeedSensor(QBittorrentSensor):
+    _attr_device_class = SensorDeviceClass.DATA_RATE
+    _attr_native_unit_of_measurement = UnitOfDataRate.BYTES_PER_SECOND
+    _attr_suggested_display_precision = 2
+    _attr_suggested_unit_of_measurement = UnitOfDataRate.MEGABYTES_PER_SECOND
+
+    def __init__(self, qbittorrent_client: QBittorrentClient, config_entry: ConfigEntry, name: str, key: str):
+        super().__init__(qbittorrent_client, config_entry, name, key)
+        if key == SENSOR_TYPE_DOWNLOAD_SPEED:
+            self._attr_icon = "mdi:cloud-download"
+        elif key == SENSOR_TYPE_UPLOAD_SPEED:
+            self._attr_icon = "mdi:cloud-upload"
+
     def update(self) -> None:
         """Get the latest data from qBittorrent and updates the state."""
-        download = self._client.qb_data.data["server_state"]["dl_info_speed"]
-        upload = self._client.qb_data.data["server_state"]["up_info_speed"]
+        download = self._client.qb_data.download_speed
+        upload = self._client.qb_data.upload_speed
 
-        sensor_type = self.entity_description.key
-        if sensor_type == SENSOR_TYPE_CURRENT_STATUS:
-            if upload > 0 and download > 0:
-                self._state = "up_down"
-            elif upload > 0 and download == 0:
-                self._state = "seeding"
-            elif upload == 0 and download > 0:
-                self._state = "downloading"
-            else:
-                self._state = STATE_IDLE
-
-        elif sensor_type == SENSOR_TYPE_DOWNLOAD_SPEED:
+        sensor_type = self._key
+        if sensor_type == SENSOR_TYPE_DOWNLOAD_SPEED:
             self._state = format_speed(download)
         elif sensor_type == SENSOR_TYPE_UPLOAD_SPEED:
             self._state = format_speed(upload)
+
+
+class QBittorrentStateSensor(QBittorrentSensor):
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [STATE_IDLE, STATE_UP_DOWN, STATE_SEEDING, STATE_DOWNLOADING]
+    _attr_translation_key = "qbittorrent_status"
+
+    def update(self) -> None:
+        """Get the latest data from qBittorrent and updates the state."""
+        download = self._client.qb_data.download_speed
+        upload = self._client.qb_data.upload_speed
+
+        if upload > 0 and download > 0:
+            self._state = STATE_UP_DOWN
+        elif upload > 0 and download == 0:
+            self._state = STATE_SEEDING
+        elif upload == 0 and download > 0:
+            self._state = STATE_DOWNLOADING
+        else:
+            self._state = STATE_IDLE
