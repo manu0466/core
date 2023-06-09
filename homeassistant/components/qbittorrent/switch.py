@@ -1,10 +1,11 @@
 """Support for setting the Transmission BitTorrent client Turtle Mode."""
+from collections.abc import Callable
 import logging
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, STATE_OFF, STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -28,7 +29,6 @@ async def async_setup_entry(
     """Set up the Transmission switch."""
 
     qb_client = hass.data[DOMAIN][config_entry.entry_id]
-    config_entry.data[CONF_NAME]
 
     dev = [
         QBittorrentSwitch(qb_client, config_entry, "On/Off", "on_off"),
@@ -50,13 +50,13 @@ class QBittorrentSwitch(SwitchEntity):
         config_entry: ConfigEntry,
         name: str,
         switch_type: str,
-    ):
+    ) -> None:
         """Initialize the Transmission switch."""
         self._name = name
         self.type = switch_type
         self._qb_client = qb_client
         self._state = STATE_OFF
-        self.unsub_update = None
+        self.unsub_update: Callable[[], None] | None = None
         self._attr_device_info = DeviceInfo(
             entry_type=DeviceEntryType.SERVICE,
             identifiers={(DOMAIN, config_entry.entry_id)},
@@ -66,17 +66,17 @@ class QBittorrentSwitch(SwitchEntity):
         self._config_entry = config_entry
 
     @property
-    def name(self):
+    def name(self) -> str | None:
         """Return the name of the switch."""
         return f"{self._config_entry.title} {self._name}"
 
     @property
-    def unique_id(self):
+    def unique_id(self) -> str | None:
         """Return the unique id of the entity."""
         return f"{self._config_entry.entry_id}-{self.type}"
 
     @property
-    def is_on(self):
+    def is_on(self) -> bool | None:
         """Return true if device is on."""
         return self._state == STATE_ON
 

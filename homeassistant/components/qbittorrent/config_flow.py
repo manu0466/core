@@ -5,7 +5,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, OptionsFlow
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.const import (
     CONF_HOST,
     CONF_NAME,
@@ -45,7 +45,7 @@ class QbittorrentConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
+        config_entry: ConfigEntry,
     ) -> QBittorrentOptionsFlowHandler:
         """Get the options flow for this handler."""
         return QBittorrentOptionsFlowHandler(config_entry)
@@ -76,11 +76,11 @@ class QbittorrentConfigFlow(ConfigFlow, domain=DOMAIN):
 class QBittorrentOptionsFlowHandler(OptionsFlow):
     """Handle qBittorrent client options."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+    def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize qBittorrent options flow."""
         self.config_entry = config_entry
 
-    async def async_step_init(self, user_input=None):
+    async def async_step_init(self, user_input=None) -> FlowResult:
         """Manage the qBittorrent options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)

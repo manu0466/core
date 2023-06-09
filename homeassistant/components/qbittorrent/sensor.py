@@ -1,6 +1,8 @@
 """Support for monitoring the qBittorrent API."""
 from __future__ import annotations
 
+from datetime import date, datetime
+from decimal import Decimal
 import logging
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
@@ -9,6 +11,7 @@ from homeassistant.const import STATE_IDLE, UnitOfDataRate
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import StateType
 
 from . import QBittorrentClient
 from .const import DOMAIN, STATE_DOWNLOADING, STATE_SEEDING, STATE_UP_DOWN
@@ -64,20 +67,20 @@ class QBittorrentSensor(SensorEntity):
         self._config_entry = config_entry
         self._name = name
         self._key = key
-        self._state = None
+        self._state: str | None = None
 
     @property
-    def name(self):
+    def name(self) -> str | None:
         """Return the name of the sensor."""
         return f"{self._config_entry.title} {self._name}"
 
     @property
-    def unique_id(self):
+    def unique_id(self) -> str | None:
         """Return the unique id of the entity."""
         return f"{self._config_entry.entry_id}-{self._key}"
 
     @property
-    def native_value(self):
+    def native_value(self) -> StateType | date | datetime | Decimal:
         """Return the state of the sensor."""
         return self._state
 
@@ -100,6 +103,8 @@ class QBittorrentSensor(SensorEntity):
 
 
 class QBittorrentSpeedSensor(QBittorrentSensor):
+    """qBittorrent sensor to display a network speed."""
+
     _attr_device_class = SensorDeviceClass.DATA_RATE
     _attr_native_unit_of_measurement = UnitOfDataRate.BYTES_PER_SECOND
     _attr_suggested_display_precision = 2
@@ -111,11 +116,12 @@ class QBittorrentSpeedSensor(QBittorrentSensor):
         config_entry: ConfigEntry,
         name: str,
         key: str,
-    ):
+    ) -> None:
+        """Initialize the qBittorrent speed sensor."""
         super().__init__(qbittorrent_client, config_entry, name, key)
-        if key == SENSOR_TYPE_DOWNLOAD_SPEED or key == SENSOR_TYPE_DOWNLOAD_SPEED_LIMIT:
+        if key in [SENSOR_TYPE_DOWNLOAD_SPEED, SENSOR_TYPE_DOWNLOAD_SPEED_LIMIT]:
             self._attr_icon = "mdi:cloud-download"
-        elif key == SENSOR_TYPE_UPLOAD_SPEED or key == SENSOR_TYPE_UPLOAD_SPEED_LIMIT:
+        elif key in [SENSOR_TYPE_UPLOAD_SPEED, SENSOR_TYPE_UPLOAD_SPEED_LIMIT]:
             self._attr_icon = "mdi:cloud-upload"
 
     def update(self) -> None:
@@ -132,6 +138,8 @@ class QBittorrentSpeedSensor(QBittorrentSensor):
 
 
 class QBittorrentStateSensor(QBittorrentSensor):
+    """qBittorrent state sensor."""
+
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [STATE_IDLE, STATE_UP_DOWN, STATE_SEEDING, STATE_DOWNLOADING]
     _attr_translation_key = "qbittorrent_status"

@@ -1,7 +1,9 @@
 """The qbittorrent component."""
+from collections.abc import Callable
 from datetime import timedelta
 import logging
 from time import sleep
+from typing import cast
 
 import qbittorrentapi
 from qbittorrentapi import TorrentInfoList, TransferInfoDictionary
@@ -66,7 +68,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def get_client(hass: HomeAssistant, entry) -> qbittorrentapi.Client:
-    """Creates a new qbittorrent.Client instance."""
+    """Create a new qbittorrent.Client instance."""
     host = entry[CONF_HOST]
     try:
         client = await hass.async_add_executor_job(
@@ -98,16 +100,12 @@ class QBittorrentClient:
         """QBittorrentClient client constructor."""
         self.hass = hass
         self.config_entry = config_entry
-        self._qb_data: QBittorrentData = None
-        self.unsub_timer = None
-        self._qb_client: qbittorrentapi.Client = None
-
-    @property
-    def api(self):
-        return self._qb_data
+        self.api: QBittorrentData = cast(QBittorrentData, None)
+        self.unsub_timer: Callable[[], None] | None = None
+        self._qb_client: qbittorrentapi.Client | None = None
 
     async def async_setup(self) -> None:
-        """Sets up the QBittorrentClient instance."""
+        """Set up the QBittorrentClient instance."""
         try:
             self._qb_client = await get_client(self.hass, self.config_entry.data)
         except AuthenticationError as err:
@@ -115,10 +113,10 @@ class QBittorrentClient:
         except CannotConnect as err:
             raise ConfigEntryNotReady from err
 
-        self._qb_data = QBittorrentData(self.hass, self.config_entry, self._qb_client)
+        self.api = QBittorrentData(self.hass, self.config_entry, self._qb_client)
 
-        await self.hass.async_add_executor_job(self._qb_data.init_torrent_list)
-        await self.hass.async_add_executor_job(self._qb_data.update)
+        await self.hass.async_add_executor_job(self.api.init_torrent_list)
+        await self.hass.async_add_executor_job(self.api.update)
 
         self.add_options()
         self.set_scan_interval(self.config_entry.options[CONF_SCAN_INTERVAL])
@@ -146,7 +144,7 @@ class QBittorrentClient:
 
         def refresh(event_time):
             """Get the latest data from Transmission."""
-            self._qb_data.update()
+            self.api.update()
 
         if self.unsub_timer is not None:
             self.unsub_timer()
@@ -277,41 +275,46 @@ class QBittorrentData:
 
     @property
     def available(self) -> bool:
+        """Gets the availability state of the server."""
         return self._available
 
     @property
     def download_speed(self) -> int:
         """Gets the server global download speed in bytes/s."""
-        return self._transfer_info[QBITTORRENT_INFO_KEY_DOWNLOAD_RATE]
+        return cast(int, self._transfer_info[QBITTORRENT_INFO_KEY_DOWNLOAD_RATE])
 
     @property
     def download_limit(self) -> int:
         """Gets the server global download speed in bytes/s."""
-        return self._transfer_info[QBITTORRENT_INFO_KEY_DOWNLOAD_LIMIT]
+        return cast(int, self._transfer_info[QBITTORRENT_INFO_KEY_DOWNLOAD_LIMIT])
 
     @property
     def upload_speed(self) -> int:
         """Gets the server global upload speed in bytes/s."""
-        return self._transfer_info[QBITTORRENT_INFO_KEY_UPLOAD_RATE]
+        return cast(int, self._transfer_info[QBITTORRENT_INFO_KEY_UPLOAD_RATE])
 
     @property
     def upload_limit(self) -> int:
         """Gets the server global download speed in bytes/s."""
-        return self._transfer_info[QBITTORRENT_INFO_KEY_UPLOAD_LIMIT]
+        return cast(int, self._transfer_info[QBITTORRENT_INFO_KEY_UPLOAD_LIMIT])
 
     @property
     def active_torrent_count(self):
+        """Gets the number of active torrents."""
         return len(self._started_torrents)
 
     def resume_all_torrent(self):
+        """Resume all the torrents."""
         self._client.torrents_resume("all")
-        # Delay to give some time at the server to update its state.
+        # Delay to give some time to the server to update its state.
         sleep(3)
 
     def pause_all_torrent(self):
+        """Pause all the torrents."""
         self._client.torrents_pause("all")
-        # Delay to give some time at the server to update its state.
+        # Delay to give some time to the server to update its state.
         sleep(3)
 
     def set_alternative_speed(self, enabled: bool):
+        """Enable/Disable the alternative speed limits."""
         self._client.transfer_set_speed_limits_mode(enabled)
