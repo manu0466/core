@@ -1,25 +1,31 @@
 """The qbittorrent component."""
-import logging
 from datetime import timedelta
+import logging
+from time import sleep
 
 import qbittorrentapi
 from qbittorrentapi import TorrentInfoList, TransferInfoDictionary
-from qbittorrentapi.exceptions import LoginFailed, APIConnectionError
+from qbittorrentapi.exceptions import (
+    APIConnectionError,
+    LoginFailed,
+    Unauthorized401Error,
+)
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
-    CONF_PORT,
     CONF_PASSWORD,
+    CONF_PORT,
+    CONF_SCAN_INTERVAL,
     CONF_USERNAME,
     CONF_VERIFY_SSL,
-    CONF_SCAN_INTERVAL,
     Platform,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.dispatcher import dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
+
 from .const import (
     DATA_UPDATED,
     DEFAULT_SCAN_INTERVAL,
@@ -27,13 +33,15 @@ from .const import (
     EVENT_DOWNLOADED_TORRENT,
     EVENT_REMOVED_TORRENT,
     EVENT_STARTED_TORRENT,
+    QBITTORRENT_INFO_KEY_DOWNLOAD_LIMIT,
     QBITTORRENT_INFO_KEY_DOWNLOAD_RATE,
-    QBITTORRENT_INFO_KEY_UPLOAD_RATE
+    QBITTORRENT_INFO_KEY_UPLOAD_LIMIT,
+    QBITTORRENT_INFO_KEY_UPLOAD_RATE,
 )
 from .errors import AuthenticationError, CannotConnect
 from .helpers import setup_client
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,7 +66,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def get_client(hass: HomeAssistant, entry) -> qbittorrentapi.Client:
-    """Creates a new qbittorrent.Client instance"""
+    """Creates a new qbittorrent.Client instance."""
     host = entry[CONF_HOST]
     try:
         client = await hass.async_add_executor_job(
@@ -67,9 +75,12 @@ async def get_client(hass: HomeAssistant, entry) -> qbittorrentapi.Client:
             entry[CONF_PORT],
             entry[CONF_USERNAME],
             entry[CONF_PASSWORD],
-            entry[CONF_VERIFY_SSL]
+            entry[CONF_VERIFY_SSL],
         )
     except LoginFailed as err:
+        _LOGGER.error("Credentials for qBittorrent client are not valid")
+        raise AuthenticationError from err
+    except Unauthorized401Error as err:
         _LOGGER.error("Credentials for qBittorrent client are not valid")
         raise AuthenticationError from err
     except APIConnectionError as err:
@@ -84,15 +95,19 @@ class QBittorrentClient:
     """QBittorrentClient client object."""
 
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
-        """QBittorrentClient client constructor"""
+        """QBittorrentClient client constructor."""
         self.hass = hass
         self.config_entry = config_entry
-        self.qb_data: QBittorrentData = None
+        self._qb_data: QBittorrentData = None
         self.unsub_timer = None
         self._qb_client: qbittorrentapi.Client = None
 
+    @property
+    def api(self):
+        return self._qb_data
+
     async def async_setup(self) -> None:
-        """Sets up the QBittorrentClient instance"""
+        """Sets up the QBittorrentClient instance."""
         try:
             self._qb_client = await get_client(self.hass, self.config_entry.data)
         except AuthenticationError as err:
@@ -100,10 +115,10 @@ class QBittorrentClient:
         except CannotConnect as err:
             raise ConfigEntryNotReady from err
 
-        self.qb_data = QBittorrentData(self.hass, self.config_entry, self._qb_client)
+        self._qb_data = QBittorrentData(self.hass, self.config_entry, self._qb_client)
 
-        await self.hass.async_add_executor_job(self.qb_data.init_torrent_list)
-        await self.hass.async_add_executor_job(self.qb_data.update)
+        await self.hass.async_add_executor_job(self._qb_data.init_torrent_list)
+        await self.hass.async_add_executor_job(self._qb_data.update)
 
         self.add_options()
         self.set_scan_interval(self.config_entry.options[CONF_SCAN_INTERVAL])
@@ -131,7 +146,7 @@ class QBittorrentClient:
 
         def refresh(event_time):
             """Get the latest data from Transmission."""
-            self.qb_data.update()
+            self._qb_data.update()
 
         if self.unsub_timer is not None:
             self.unsub_timer()
@@ -144,9 +159,9 @@ class QBittorrentData:
     """Get the latest data and update the states."""
 
     def __init__(
-            self, hass: HomeAssistant, config: ConfigEntry, client: qbittorrentapi.Client
+        self, hass: HomeAssistant, config: ConfigEntry, client: qbittorrentapi.Client
     ) -> None:
-        """Initialize the QBittorrentData"""
+        """Initialize the QBittorrentData."""
         self.hass = hass
         self.config = config
         self._client: qbittorrentapi.Client = client
@@ -154,14 +169,101 @@ class QBittorrentData:
         self._torrents: TorrentInfoList = TorrentInfoList([], client)
         self._completed_torrents: TorrentInfoList = TorrentInfoList([], client)
         self._started_torrents: TorrentInfoList = TorrentInfoList([], client)
-        self._alternative_speed_enabled: bool = False
+        self.alternative_speed_enabled: bool = False
         # Info about the content of this dictionary
         # https://github.com/qbittorrent/qBittorrent/wik1i/WebUI-API-(qBittorrent-4.1)#get-global-transfer-info
-        self._transfer_info: TransferInfoDictionary = TransferInfoDictionary({
-            QBITTORRENT_INFO_KEY_DOWNLOAD_RATE: 0,
-            QBITTORRENT_INFO_KEY_UPLOAD_RATE: 0
-        })
+        self._transfer_info: TransferInfoDictionary = TransferInfoDictionary(
+            {QBITTORRENT_INFO_KEY_DOWNLOAD_RATE: 0, QBITTORRENT_INFO_KEY_UPLOAD_RATE: 0}
+        )
         self._available: bool = True
+
+    def init_torrent_list(self):
+        """Initialize torrent lists."""
+        self._torrents = self._client.torrents.info()
+        self._completed_torrents = [
+            torrent for torrent in self._torrents if torrent.info.state_enum.is_complete
+        ]
+        self._started_torrents = [
+            torrent
+            for torrent in self._torrents
+            if torrent.info.state_enum.is_downloading
+        ]
+
+    def update(self):
+        """Get the latest data from the qBittorrent instance."""
+        try:
+            # Torrent update logic
+            self._torrents = self._client.torrents.info()
+            self.check_completed_torrent()
+            self.check_started_torrent()
+            self.check_removed_torrent()
+            # Server statistics
+            self._transfer_info = self._client.transfer.info
+            self.alternative_speed_enabled = (
+                self._client.transfer.speed_limits_mode == "1"
+            )
+            _LOGGER.debug("Torrent Data for %s Updated", self.host)
+            self._available = True
+        except APIConnectionError:
+            self._available = False
+            _LOGGER.error("Unable to connect to qBittorrent client %s", self.host)
+
+        dispatcher_send(self.hass, self.signal_update)
+
+    def check_completed_torrent(self):
+        """Get completed torrent functionality."""
+        old_completed_torrent_names = {
+            torrent.name for torrent in self._completed_torrents
+        }
+
+        current_completed_torrents = [
+            torrent for torrent in self._torrents if torrent.state_enum.is_complete
+        ]
+
+        for torrent in current_completed_torrents:
+            if torrent.name not in old_completed_torrent_names:
+                self.hass.bus.fire(
+                    EVENT_DOWNLOADED_TORRENT,
+                    {"name": torrent["name"], "hash": torrent["hash"]},
+                )
+
+        self._completed_torrents = current_completed_torrents
+
+    def check_started_torrent(self):
+        """Get started torrent functionality."""
+        old_started_torrent_names = {torrent.name for torrent in self._started_torrents}
+
+        current_started_torrents = [
+            torrent
+            for torrent in self._torrents
+            if torrent.state_enum.is_downloading and not torrent.state_enum.is_paused
+        ]
+
+        for torrent in current_started_torrents:
+            if torrent.name not in old_started_torrent_names:
+                self.hass.bus.fire(
+                    EVENT_STARTED_TORRENT,
+                    {"name": torrent["name"], "hash": torrent["hash"]},
+                )
+        self._started_torrents = current_started_torrents
+
+    def check_removed_torrent(self):
+        """Get removed torrent functionality."""
+        current_torrent_names = {torrent.name for torrent in self._torrents}
+
+        for torrent in self._torrents:
+            if torrent.name not in current_torrent_names:
+                self.hass.bus.fire(
+                    EVENT_REMOVED_TORRENT,
+                    {"name": torrent["name"], "hash": torrent["hash"]},
+                )
+
+        self._all_torrents = self._torrents.copy()
+
+    @property
+    def signal_update(self):
+        """Update signal per qbittorrent entry."""
+        return f"{DATA_UPDATED}-{self.host}-{self.port}"
 
     @property
     def host(self) -> str:
@@ -174,94 +276,42 @@ class QBittorrentData:
         return self.config.data[CONF_PORT]
 
     @property
-    def signal_update(self):
-        """Update signal per qbittorrent entry."""
-        return f"{DATA_UPDATED}-{self.host}-{self.port}"
+    def available(self) -> bool:
+        return self._available
 
     @property
     def download_speed(self) -> int:
-        """Gets the server global download speed in bytes/s"""
+        """Gets the server global download speed in bytes/s."""
         return self._transfer_info[QBITTORRENT_INFO_KEY_DOWNLOAD_RATE]
 
     @property
+    def download_limit(self) -> int:
+        """Gets the server global download speed in bytes/s."""
+        return self._transfer_info[QBITTORRENT_INFO_KEY_DOWNLOAD_LIMIT]
+
+    @property
     def upload_speed(self) -> int:
-        """Gets the server global upload speed in bytes/s"""
+        """Gets the server global upload speed in bytes/s."""
         return self._transfer_info[QBITTORRENT_INFO_KEY_UPLOAD_RATE]
 
-    def init_torrent_list(self):
-        """Initialize torrent lists."""
-        self._torrents = self._client.torrents.info()
-        self._completed_torrents = [
-            torrent for torrent in self._torrents if torrent.info.state_enum.is_complete
-        ]
-        self._started_torrents = [
-            torrent for torrent in self._torrents if torrent.info.state_enum.is_downloading
-        ]
+    @property
+    def upload_limit(self) -> int:
+        """Gets the server global download speed in bytes/s."""
+        return self._transfer_info[QBITTORRENT_INFO_KEY_UPLOAD_LIMIT]
 
-    def update(self):
-        """Get the latest data from Transmission instance."""
-        try:
-            # Torrent update logic
-            self._torrents = self._client.torrents.info()
-            self.check_completed_torrent()
-            self.check_started_torrent()
-            self.check_removed_torrent()
-            # Server statistics
-            self.transfer_info = self._client.transfer.info
-            self.alternative_speed_enabled = self._client.transfer.speed_limits_mode == 1
+    @property
+    def active_torrent_count(self):
+        return len(self._started_torrents)
 
-            _LOGGER.debug("Torrent Data for %s Updated", self.host)
+    def resume_all_torrent(self):
+        self._client.torrents_resume("all")
+        # Delay to give some time at the server to update its state.
+        sleep(3)
 
-            self.available = True
-        except APIConnectionError:
-            self.available = False
-            _LOGGER.error("Unable to connect to qBittorrent client %s", self.host)
+    def pause_all_torrent(self):
+        self._client.torrents_pause("all")
+        # Delay to give some time at the server to update its state.
+        sleep(3)
 
-        dispatcher_send(self.hass, self.signal_update)
-
-    def check_completed_torrent(self):
-        """Get completed torrent functionality."""
-        old_completed_torrent_names = {
-            torrent.name for torrent in self._completed_torrents
-        }
-
-        current_completed_torrents = [
-            torrent for torrent in self._torrents if torrent.is_completed
-        ]
-
-        for torrent in current_completed_torrents:
-            if torrent.name not in old_completed_torrent_names:
-                self.hass.bus.fire(
-                    EVENT_DOWNLOADED_TORRENT,
-                    {"name": torrent['name'], "hash": torrent['hash']},
-                )
-
-        self._completed_torrents = current_completed_torrents
-
-    def check_started_torrent(self):
-        """Get started torrent functionality."""
-        old_started_torrent_names = {torrent.name for torrent in self._started_torrents}
-
-        current_started_torrents = [
-            torrent for torrent in self._torrents if torrent.is_downloading
-        ]
-
-        for torrent in current_started_torrents:
-            if torrent.name not in old_started_torrent_names:
-                self.hass.bus.fire(
-                    EVENT_STARTED_TORRENT, {"name": torrent['name'], "hash": torrent['hash']}
-                )
-
-        self._started_torrents = current_started_torrents
-
-    def check_removed_torrent(self):
-        """Get removed torrent functionality."""
-        current_torrent_names = {torrent.name for torrent in self._torrents}
-
-        for torrent in self._torrents:
-            if torrent.name not in current_torrent_names:
-                self.hass.bus.fire(
-                    EVENT_REMOVED_TORRENT, {"name": torrent['name'], "hash": torrent['hash']}
-                )
-
-        self._all_torrents = self._torrents.copy()
+    def set_alternative_speed(self, enabled: bool):
+        self._client.transfer_set_speed_limits_mode(enabled)
